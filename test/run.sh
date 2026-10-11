@@ -5,7 +5,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 db=grants_check_test
 psql -q -U postgres -c "drop database if exists $db" -c "create database $db"
-psql -q -U postgres -c "drop role if exists anon" -c "drop role if exists authenticated" -c "drop role if exists service_role" 2>/dev/null || true
+psql -q -U postgres -c "drop role if exists anon" -c "drop role if exists authenticated" -c "drop role if exists service_role" -c "drop role if exists supabase_admin" 2>/dev/null || true
 psql -q -U postgres -d $db -f "$here/fixture.sql"
 echo "== before 30 Oct 2026 =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
@@ -21,3 +21,8 @@ psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
 sed "s/date '2026-10-30'/date '2000-01-01'/g" "$here/../check.sql" > /tmp/check-after.sql
 echo "== after the suggested fix, read after 30 Oct 2026 =="
 psql -U postgres -d $db -P pager=off -f /tmp/check-after.sql
+# The other fixes the check prints, run as printed, then the check again: their rows must be gone.
+psql -q -U postgres -d $db -c "revoke truncate, references, trigger, maintain on all tables in schema public from anon, authenticated" \
+  -c "grant usage, select on sequence public.orders_id_seq to authenticated"
+echo "== after the truncate and id counter fixes =="
+psql -U postgres -d $db -P pager=off -f "$here/../check.sql"

@@ -49,6 +49,64 @@ tables as (
     and not exists (select 1 from pg_depend dep where dep.objid = c.oid and dep.deptype = 'e')
 ),
 
+-- Postgres 17 added a MAINTAIN right next to TRUNCATE, REFERENCES and TRIGGER.
+pg as (
+  select current_setting('server_version_num')::int >= 170000 as has_maintain
+),
+
+-- Rights beyond read and write that new tables still give the browser roles.
+extra_defaults as (
+  select a.grantee::regrole::text as role,
+         string_agg(distinct lower(a.privilege_type), ', ') as rights
+  from pg_default_acl d, aclexplode(d.defaclacl) a
+  where d.defaclrole = 'postgres'::regrole
+    and d.defaclnamespace = 'public'::regnamespace
+    and d.defaclobjtype = 'r'
+    and a.grantee in ('anon'::regrole, 'authenticated'::regrole)
+    and a.privilege_type in ('TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')
+  group by a.grantee
+),
+
+-- Defaults set by Supabase's own admin role. A project owner cannot change these.
+admin_defaults as (
+  select string_agg(distinct a.grantee::regrole::text, ', ') as roles
+  from pg_default_acl d, aclexplode(d.defaclacl) a
+  where d.defaclrole = to_regrole('supabase_admin')
+    and d.defaclnamespace = 'public'::regnamespace
+    and d.defaclobjtype = 'r'
+    and a.grantee in ('anon'::regrole, 'authenticated'::regrole)
+  having count(*) > 0
+),
+
+-- Tables where the browser roles still hold TRUNCATE, REFERENCES or TRIGGER.
+extra_tables as (
+  select count(*) as n
+  from tables t
+  where t.relkind in ('r', 'p')
+    and (has_table_privilege('anon', t.oid, 'TRUNCATE,REFERENCES,TRIGGER')
+      or has_table_privilege('authenticated', t.oid, 'TRUNCATE,REFERENCES,TRIGGER'))
+  having count(*) > 0
+),
+
+-- Id counters (serial columns) a role cannot use on a table it can insert into.
+-- Identity columns do not need a grant, so they are left out.
+sequences as (
+  select format('%I.%I', sn.nspname, s.relname) as seq,
+         tb.name as tbl,
+         r.role
+  from pg_class s
+  join pg_namespace sn on sn.oid = s.relnamespace
+  join pg_depend dep on dep.objid = s.oid
+                    and dep.classid = 'pg_class'::regclass
+                    and dep.refclassid = 'pg_class'::regclass
+                    and dep.deptype = 'a'
+  join tables tb on tb.oid = dep.refobjid
+  cross join roles r
+  where s.relkind = 'S'
+    and has_table_privilege(r.role, tb.oid, 'INSERT')
+    and not has_sequence_privilege(r.role, s.oid, 'USAGE')
+),
+
 -- Every function in public that a signed-out visitor can call.
 functions as (
   select p.oid::regprocedure::text as name,
@@ -56,6 +114,8 @@ functions as (
   from pg_proc p
   where p.pronamespace = 'public'::regnamespace
     and p.prokind in ('f', 'p')
+    -- Trigger functions cannot be called through the API, so they are left out.
+    and p.prorettype not in ('trigger'::regtype, 'event_trigger'::regtype)
     and has_function_privilege('anon', p.oid, 'EXECUTE')
     and not exists (select 1 from pg_depend dep where dep.objid = p.oid and dep.deptype = 'e')
 ),
@@ -122,6 +182,50 @@ findings(level, area, object, finding, fix) as (
               else 'Signed-out visitors can call this function.' end,
          'revoke execute on function ' || f.name || ' from public, anon;  -- only if the app does not call it signed out'
   from functions f
+
+  union all
+
+  -- Rights the Data API never uses, still given to new tables.
+  select 2,
+         'new tables',
+         e.role,
+         'New tables still give ' || e.role || ' these rights: ' || e.rights || '. The Data API never uses them, but TRUNCATE skips row level security if anything runs SQL as this role.',
+         'alter default privileges for role postgres in schema public revoke truncate, references, trigger'
+           || case when (select has_maintain from pg) then ', maintain' else '' end
+           || ' on tables from ' || e.role || ';'
+  from extra_defaults e
+
+  union all
+
+  -- Supabase's own admin role.
+  select 2,
+         'new tables',
+         'supabase_admin',
+         'Objects Supabase''s own admin role creates in public arrive open to ' || a.roles || '. A project owner cannot change that default (permission denied). If such an object shows up in the rows here, revoke on that object directly.',
+         ''
+  from admin_defaults a
+
+  union all
+
+  -- Tables that still carry TRUNCATE, REFERENCES or TRIGGER for the browser roles.
+  select 2,
+         'tables (all)',
+         x.n || ' tables',
+         'Signed-out visitors or signed-in users hold TRUNCATE, REFERENCES or TRIGGER on these tables. The Data API never uses them, but TRUNCATE skips row level security. Revoking them does not affect the Data API.',
+         'revoke truncate, references, trigger'
+           || case when (select has_maintain from pg) then ', maintain' else '' end
+           || ' on all tables in schema public from anon, authenticated;'
+  from extra_tables x
+
+  union all
+
+  -- Id counters a role cannot use.
+  select 1,
+         'sequence',
+         s.seq,
+         'Inserts into ' || s.tbl || ' through the API as ' || s.role || ' will fail: it can insert into the table but cannot use this id counter (permission denied for sequence).',
+         'grant usage, select on sequence ' || s.seq || ' to ' || s.role || ';'
+  from sequences s
 )
 
 select level, area, object, finding, fix

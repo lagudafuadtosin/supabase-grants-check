@@ -37,7 +37,10 @@ The `fix` column holds the exact line to paste **if** you decide to change somet
 - **Tables your server key cannot read.**
 - **Tables with row level security on and no policies.** API users see nothing. Fine if only your server uses them.
 - **Views the API can reach.** Views skip row level security unless made with `security_invoker`.
-- **Functions a signed-out visitor can call**, flagged hardest when they are `SECURITY DEFINER`, because those run with their owner's rights.
+- **Functions a signed-out visitor can call**, flagged hardest when they are `SECURITY DEFINER`, because those run with their owner's rights. Trigger functions are left out, because the API cannot call them.
+- **Id counters that will refuse inserts.** A `serial` column has its own sequence, and a table grant does not cover it. If a role can insert into the table but cannot use the sequence, inserts through the API fail with `permission denied for sequence`. Identity columns need no grant and are left out.
+- **Rights the Data API never uses.** Supabase's old defaults give `anon` and `authenticated` TRUNCATE, REFERENCES and TRIGGER (and MAINTAIN on Postgres 17) on every table. The API never uses them, but TRUNCATE skips row level security if anything runs SQL as those roles. Shown as one row with one safe revoke.
+- **Supabase's own admin role.** Objects that `supabase_admin` creates in `public` arrive open to `anon` and `authenticated`, and a project owner cannot change that default. The check tells you when that default exists.
 
 ## The fix most projects need
 
@@ -63,12 +66,12 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Tested
 
-`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check four ways: before 30 Oct, after the change, after the suggested fix, and the same read as if today were after 30 Oct. Tested on PostgreSQL 18.
+`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check five ways: before 30 Oct, after the change, after the suggested fix, the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away. Tested on PostgreSQL 18, and run read-only on a live Supabase project.
 
 ## Limits
 
 - It only looks at the `public` schema, the one the Data API exposes by default.
-- It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use.
+- It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use, and only reports the `supabase_admin` defaults, because they cannot be changed from the SQL editor.
 - It is a guide, not an audit. It cannot know what your app is meant to allow.
 
 ## Licence
