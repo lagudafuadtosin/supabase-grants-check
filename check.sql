@@ -39,9 +39,10 @@ tables as (
          c.relkind,
          c.relrowsecurity as rls,
          (select count(*) from pg_policy p where p.polrelid = c.oid) as policies,
-         has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE') as anon_any,
-         has_table_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE,DELETE') as auth_any,
-         has_table_privilege('service_role', c.oid, 'SELECT') as server_reads
+         -- any-column: a grant on single columns still reaches the Data API
+         (has_any_column_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE') or has_table_privilege('anon', c.oid, 'DELETE')) as anon_any,
+         (has_any_column_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE') or has_table_privilege('authenticated', c.oid, 'DELETE')) as auth_any,
+         has_any_column_privilege('service_role', c.oid, 'SELECT') as server_reads
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'public'
@@ -103,7 +104,7 @@ sequences as (
   join tables tb on tb.oid = dep.refobjid
   cross join roles r
   where s.relkind = 'S'
-    and has_table_privilege(r.role, tb.oid, 'INSERT')
+    and has_any_column_privilege(r.role, tb.oid, 'INSERT')
     and not has_sequence_privilege(r.role, s.oid, 'USAGE')
 ),
 

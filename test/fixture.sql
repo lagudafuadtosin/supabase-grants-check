@@ -30,6 +30,9 @@ create table public.events (id int generated always as identity, kind text);  --
 alter table public.events enable row level security;
 create policy see on public.events for select to authenticated using (true);
 create view public.all_notes as select * from public.open_notes;              -- view: level 3 note
+create table public.column_only (id serial primary key, email text, secret text);  -- row security off, anon granted two columns only: level 1
+revoke all on public.column_only from anon, authenticated;
+grant select (id, email) on public.column_only to anon;
 
 create function public.add_credits(n int) returns int language sql security definer as 'select n';  -- level 1
 create function public.stamp() returns trigger language plpgsql as 'begin return new; end';  -- trigger function: never flagged
