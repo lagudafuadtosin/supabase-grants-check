@@ -45,3 +45,11 @@ grant select (id, email) on public.column_only to anon;
 create function public.add_credits(n int) returns int language sql security definer as 'select n';  -- level 1
 create function public.stamp() returns trigger language plpgsql as 'begin return new; end';  -- trigger function: never flagged
 create function public.hello() returns text language sql as 'select ''hi''';                         -- level 2
+
+-- A second schema, as if added to the Data API's exposed list. Only read when it is in
+-- the schemas list at the top of check.sql (test/run.sh adds it for one pass).
+create schema api;
+grant usage on schema api to anon, authenticated, service_role;
+create table api.open_api_notes (id serial primary key, body text);           -- row security off, open: level 1 (api)
+grant select on api.open_api_notes to anon;
+create table api.private_api (id serial primary key);                          -- nobody but the owner: fine

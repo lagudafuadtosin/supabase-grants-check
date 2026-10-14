@@ -32,3 +32,7 @@ psql -q -U postgres -d $db -c "revoke truncate, references, trigger, maintain on
   -c "alter default privileges for role postgres in schema public grant usage, select on sequences to service_role"
 echo "== after the truncate, id counter, view and sequence default fixes =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
+# With a second schema in the list: its open table must appear, named with the schema.
+sed "s/values ('public')/values ('public'), ('api')/" "$here/../check.sql" > /tmp/check-api.sql
+echo "== with the api schema in the list =="
+psql -U postgres -d $db -P pager=off -f /tmp/check-api.sql

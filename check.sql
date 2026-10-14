@@ -11,8 +11,16 @@
 --
 -- level: 1 = look at this now, 2 = check it is what you meant, 3 = fine
 -- Nothing in the "fix" column is run for you. Read it first.
+--
+-- It reads the public schema. If you added schemas to the Data API's exposed
+-- list (Project Settings > Data API), add them here, the same way:
+--   values ('public'), ('api')
+-- Rows for a schema other than public say which one in the object column.
 
 with recursive
+schemas(nsp) as (
+  values ('public')
+),
 roles(role) as (
   values ('anon'), ('authenticated'), ('service_role')
 ),
@@ -20,12 +28,14 @@ roles(role) as (
 -- Who gets new tables and new id counters (sequences) in public automatically
 -- (default privileges set by postgres). Supabase's change removes both.
 defaults as (
-  select r.role,
+  select sc.nsp,
+         r.role,
+         case when sc.nsp = 'public' then r.role else sc.nsp || ': ' || r.role end as label,
          exists (
            select 1
            from pg_default_acl d, aclexplode(d.defaclacl) a
            where d.defaclrole = 'postgres'::regrole
-             and d.defaclnamespace = 'public'::regnamespace
+             and d.defaclnamespace = sc.nsp::regnamespace
              and d.defaclobjtype = 'r'
              and a.grantee = r.role::regrole
              and a.privilege_type = 'SELECT'
@@ -34,12 +44,13 @@ defaults as (
            select 1
            from pg_default_acl d, aclexplode(d.defaclacl) a
            where d.defaclrole = 'postgres'::regrole
-             and d.defaclnamespace = 'public'::regnamespace
+             and d.defaclnamespace = sc.nsp::regnamespace
              and d.defaclobjtype = 'S'
              and a.grantee = r.role::regrole
              and a.privilege_type = 'USAGE'
          ) as gets_new_sequences
-  from roles r
+  from schemas sc
+  cross join roles r
 ),
 
 -- Every table and view the Data API can see in public.
@@ -58,7 +69,7 @@ tables as (
                                       where o ~* '^security_invoker=(on|true|t|yes|y|1)$')) as invoker
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
-  where n.nspname = 'public'
+  where n.nspname in (select nsp from schemas)
     and c.relkind in ('r', 'p', 'v', 'm')
     and not exists (select 1 from pg_depend dep where dep.objid = c.oid and dep.deptype = 'e')
 ),
@@ -127,35 +138,40 @@ view_needs as (
 
 -- Rights beyond read and write that new tables still give the browser roles.
 extra_defaults as (
-  select a.grantee::regrole::text as role,
+  select sc.nsp,
+         a.grantee::regrole::text as role,
          string_agg(distinct lower(a.privilege_type), ', ') as rights
-  from pg_default_acl d, aclexplode(d.defaclacl) a
+  from schemas sc, pg_default_acl d, aclexplode(d.defaclacl) a
   where d.defaclrole = 'postgres'::regrole
-    and d.defaclnamespace = 'public'::regnamespace
+    and d.defaclnamespace = sc.nsp::regnamespace
     and d.defaclobjtype = 'r'
     and a.grantee in ('anon'::regrole, 'authenticated'::regrole)
     and a.privilege_type in ('TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN')
-  group by a.grantee
+  group by sc.nsp, a.grantee
 ),
 
 -- Defaults set by Supabase's own admin role. A project owner cannot change these.
 admin_defaults as (
-  select string_agg(distinct a.grantee::regrole::text, ', ') as roles
-  from pg_default_acl d, aclexplode(d.defaclacl) a
+  select sc.nsp,
+         string_agg(distinct a.grantee::regrole::text, ', ') as roles
+  from schemas sc, pg_default_acl d, aclexplode(d.defaclacl) a
   where d.defaclrole = to_regrole('supabase_admin')
-    and d.defaclnamespace = 'public'::regnamespace
+    and d.defaclnamespace = sc.nsp::regnamespace
     and d.defaclobjtype = 'r'
     and a.grantee in ('anon'::regrole, 'authenticated'::regrole)
+  group by sc.nsp
   having count(*) > 0
 ),
 
 -- Tables where the browser roles still hold TRUNCATE, REFERENCES or TRIGGER.
 extra_tables as (
-  select count(*) as n
+  select split_part(t.name, '.', 1) as nsp,
+         count(*) as n
   from tables t
   where t.relkind in ('r', 'p')
     and (has_table_privilege('anon', t.oid, 'TRUNCATE,REFERENCES,TRIGGER')
       or has_table_privilege('authenticated', t.oid, 'TRUNCATE,REFERENCES,TRIGGER'))
+  group by split_part(t.name, '.', 1)
   having count(*) > 0
 ),
 
@@ -183,7 +199,7 @@ functions as (
   select p.oid::regprocedure::text as name,
          p.prosecdef as definer
   from pg_proc p
-  where p.pronamespace = 'public'::regnamespace
+  where p.pronamespace in (select nsp::regnamespace from schemas)
     and p.prokind in ('f', 'p')
     -- Trigger functions cannot be called through the API, so they are left out.
     and p.prorettype not in ('trigger'::regtype, 'event_trigger'::regtype)
@@ -197,7 +213,7 @@ findings(level, area, object, finding, fix) as (
               when d.gets_new_tables and current_date < date '2026-10-30' then 2
               else 3 end,
          'new tables',
-         d.role,
+         d.label,
          case when d.role = 'service_role' and not d.gets_new_tables
               then 'Your server key does NOT get new tables automatically. Any new table your server reads will fail with 42501 until you grant it.'
               when d.role = 'service_role' and current_date < date '2026-10-30'
@@ -210,9 +226,9 @@ findings(level, area, object, finding, fix) as (
               then d.role || ' gets every new table automatically. Make sure you meant that: every new table is open to it until row level security is on.'
               else d.role || ' does not get new tables automatically. Grant it table by table, in the migration that makes each table.' end,
          case when d.role = 'service_role' and (not d.gets_new_tables or current_date < date '2026-10-30')
-              then 'alter default privileges for role postgres in schema public grant select, insert, update, delete on tables to service_role; alter default privileges for role postgres in schema public grant usage, select on sequences to service_role;'
+              then 'alter default privileges for role postgres in schema ' || d.nsp || ' grant select, insert, update, delete on tables to service_role; alter default privileges for role postgres in schema ' || d.nsp || ' grant usage, select on sequences to service_role;'
               when d.gets_new_tables and current_date < date '2026-10-30'
-              then 'grant select, insert, update, delete on table public.<new_table> to ' || d.role || ';  -- in each new table''s migration'
+              then 'grant select, insert, update, delete on table ' || d.nsp || '.<new_table> to ' || d.role || ';  -- in each new table''s migration'
               else '' end
   from defaults d
 
@@ -222,9 +238,9 @@ findings(level, area, object, finding, fix) as (
   -- and the table default does not cover it.
   select 1,
          'new tables',
-         d.role,
+         d.label,
          d.role || ' gets every new table automatically, but not its id counters. The first insert into a new table with a serial column fails with permission denied for sequence. Identity columns are not affected.',
-         'alter default privileges for role postgres in schema public grant usage, select on sequences to ' || d.role || ';'
+         'alter default privileges for role postgres in schema ' || d.nsp || ' grant usage, select on sequences to ' || d.role || ';'
   from defaults d
   where d.gets_new_tables and not d.gets_new_sequences
 
@@ -295,9 +311,9 @@ findings(level, area, object, finding, fix) as (
   -- Rights the Data API never uses, still given to new tables.
   select 2,
          'new tables',
-         e.role,
+         case when e.nsp = 'public' then e.role else e.nsp || ': ' || e.role end,
          'New tables still give ' || e.role || ' these rights: ' || e.rights || '. The Data API never uses them, but TRUNCATE skips row level security if anything runs SQL as this role.',
-         'alter default privileges for role postgres in schema public revoke truncate, references, trigger'
+         'alter default privileges for role postgres in schema ' || e.nsp || ' revoke truncate, references, trigger'
            || case when (select has_maintain from pg) then ', maintain' else '' end
            || ' on tables from ' || e.role || ';'
   from extra_defaults e
@@ -307,8 +323,8 @@ findings(level, area, object, finding, fix) as (
   -- Supabase's own admin role.
   select 2,
          'new tables',
-         'supabase_admin',
-         'Objects Supabase''s own admin role creates in public arrive open to ' || a.roles || '. A project owner cannot change that default (permission denied). If such an object shows up in the rows here, revoke on that object directly.',
+         case when a.nsp = 'public' then 'supabase_admin' else a.nsp || ': supabase_admin' end,
+         'Objects Supabase''s own admin role creates in ' || a.nsp || ' arrive open to ' || a.roles || '. A project owner cannot change that default (permission denied). If such an object shows up in the rows here, revoke on that object directly.',
          ''
   from admin_defaults a
 
@@ -317,11 +333,11 @@ findings(level, area, object, finding, fix) as (
   -- Tables that still carry TRUNCATE, REFERENCES or TRIGGER for the browser roles.
   select 2,
          'tables (all)',
-         x.n || ' tables',
+         x.n || ' tables' || case when x.nsp = 'public' then '' else ' in ' || x.nsp end,
          'Signed-out visitors or signed-in users hold TRUNCATE, REFERENCES or TRIGGER on these tables. The Data API never uses them, but TRUNCATE skips row level security. Revoking them does not affect the Data API.',
          'revoke truncate, references, trigger'
            || case when (select has_maintain from pg) then ', maintain' else '' end
-           || ' on all tables in schema public from anon, authenticated;'
+           || ' on all tables in schema ' || x.nsp || ' from anon, authenticated;'
   from extra_tables x
 
   union all

@@ -67,11 +67,11 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Tested
 
-`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check five ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away. Tested on PostgreSQL 18, and run read-only on a live Supabase project.
+`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check six ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away, and once with a second schema in the list, whose open table must then appear. Tested on PostgreSQL 18, and run read-only on a live Supabase project.
 
 ## Limits
 
-- It only looks at the `public` schema, the one the Data API exposes by default.
+- It reads the `public` schema, the one the Data API exposes by default. If you added schemas to the exposed list (Project Settings > Data API), add them to the `schemas` list at the top of `check.sql`. The exposed list itself cannot be read from SQL, so it is typed by hand. Rows for another schema name it in the `object` column, and every fix line names its schema.
 - It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use, and only reports the `supabase_admin` defaults, because they cannot be changed from the SQL editor.
 - It is a guide, not an audit. It cannot know what your app is meant to allow.
 
