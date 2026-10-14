@@ -10,19 +10,25 @@ psql -q -U postgres -d $db -f "$here/fixture.sql"
 echo "== before 30 Oct 2026 =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
 # What Supabase's change does: new tables no longer go to the API roles.
-psql -q -U postgres -d $db -c "alter default privileges for role postgres in schema public revoke all on tables from anon, authenticated, service_role"
+psql -q -U postgres -d $db -c "alter default privileges for role postgres in schema public revoke all on tables from anon, authenticated, service_role" \
+  -c "alter default privileges for role postgres in schema public revoke all on sequences from anon, authenticated, service_role"
 echo "== after 30 Oct 2026 =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
-# The fix the check suggests for the server key, then the check again.
+# Half the fix the check suggests for the server key (tables, not sequences), then the check again:
+# the id counter default row must appear.
 psql -q -U postgres -d $db -c "alter default privileges for role postgres in schema public grant select, insert, update, delete on tables to service_role"
-echo "== after the suggested fix =="
+echo "== after the table half of the suggested fix =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
 # The same check as if today were after 30 Oct 2026 (the cut-off moved into the past).
 sed "s/date '2026-10-30'/date '2000-01-01'/g" "$here/../check.sql" > /tmp/check-after.sql
-echo "== after the suggested fix, read after 30 Oct 2026 =="
+echo "== after the table half of the suggested fix, read after 30 Oct 2026 =="
 psql -U postgres -d $db -P pager=off -f /tmp/check-after.sql
 # The other fixes the check prints, run as printed, then the check again: their rows must be gone.
 psql -q -U postgres -d $db -c "revoke truncate, references, trigger, maintain on all tables in schema public from anon, authenticated" \
-  -c "grant usage, select on sequence public.orders_id_seq to authenticated"
-echo "== after the truncate and id counter fixes =="
+  -c "grant usage, select on sequence public.orders_id_seq to authenticated" \
+  -c "alter view public.my_profiles set (security_invoker = true)" \
+  -c "revoke all on table public.profile_count from anon, authenticated" \
+  -c "grant select on table public.vault to anon, authenticated" \
+  -c "alter default privileges for role postgres in schema public grant usage, select on sequences to service_role"
+echo "== after the truncate, id counter, view and sequence default fixes =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"

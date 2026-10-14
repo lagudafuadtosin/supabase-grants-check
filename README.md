@@ -33,10 +33,11 @@ The `fix` column holds the exact line to paste **if** you decide to change somet
 ## What it checks
 
 - **New tables.** Which of the three roles gets every new table automatically, today and after 30 Oct.
+- **New id counters.** Supabase's change also stops handing new sequences to the three roles. A role that gets new tables but not new sequences fails on the first insert into a new table with a `serial` column. Flagged as level 1 with the one default-privileges line that fixes it.
 - **Tables reachable with row level security off.** Anyone with your public key can read or change them.
 - **Tables your server key cannot read.**
 - **Tables with row level security on and no policies.** API users see nothing. Fine if only your server uses them.
-- **Views the API can reach.** Views skip row level security unless made with `security_invoker`.
+- **Views the API can reach.** A view runs as its owner unless it was made with `security_invoker` (Postgres 15 or newer), so a view over a table with row level security shows every row. The check walks each view down to the tables it reads, through any views under it, and flags the ones that skip row level security, with the `alter view` line to fix it. A materialized view holds a copy of the rows and cannot follow row level security, so it is flagged with a revoke. It also warns when a `security_invoker` view is open to a role that has no rights on the table underneath, because reads through it then fail with `permission denied`.
 - **Functions a signed-out visitor can call**, flagged hardest when they are `SECURITY DEFINER`, because those run with their owner's rights. Trigger functions are left out, because the API cannot call them.
 - **Id counters that will refuse inserts.** A `serial` column has its own sequence, and a table grant does not cover it. If a role can insert into the table but cannot use the sequence, inserts through the API fail with `permission denied for sequence`. Identity columns need no grant and are left out.
 - **Rights the Data API never uses.** Supabase's old defaults give `anon` and `authenticated` TRUNCATE, REFERENCES and TRIGGER (and MAINTAIN on Postgres 17) on every table. The API never uses them, but TRUNCATE skips row level security if anything runs SQL as those roles. Shown as one row with one safe revoke.
@@ -66,7 +67,7 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Tested
 
-`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check five ways: before 30 Oct, after the change, after the suggested fix, the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away. Tested on PostgreSQL 18, and run read-only on a live Supabase project.
+`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check five ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away. Tested on PostgreSQL 18, and run read-only on a live Supabase project.
 
 ## Limits
 

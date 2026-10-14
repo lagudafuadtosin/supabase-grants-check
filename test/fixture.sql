@@ -29,7 +29,15 @@ revoke all on sequence public.orders_id_seq from authenticated;
 create table public.events (id int generated always as identity, kind text);  -- identity column: needs no counter grant, never flagged
 alter table public.events enable row level security;
 create policy see on public.events for select to authenticated using (true);
-create view public.all_notes as select * from public.open_notes;              -- view: level 3 note
+create view public.all_notes as select * from public.open_notes;              -- view as owner over a table with row security off: level 2
+create view public.my_profiles as select * from public.profiles;              -- view as owner over a table with row security on: level 1
+create view public.my_profiles_safe with (security_invoker = true) as select * from public.profiles;  -- runs as the caller: fine
+create view public.profiles_again with (security_invoker = true) as select * from public.my_profiles;  -- runs as the caller, but the view under it does not: level 1
+create materialized view public.profile_count as select count(*) as n from public.profiles;  -- copy of the rows, taken as owner: level 1
+create table public.vault (id serial primary key, secret text);               -- closed to the browser roles
+alter table public.vault enable row level security;
+revoke all on public.vault from anon, authenticated;
+create view public.vault_view with (security_invoker = true) as select * from public.vault;  -- the caller has no rights on vault, so reads fail: level 2
 create table public.column_only (id serial primary key, email text, secret text);  -- row security off, anon granted two columns only: level 1
 revoke all on public.column_only from anon, authenticated;
 grant select (id, email) on public.column_only to anon;

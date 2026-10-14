@@ -12,12 +12,13 @@
 -- level: 1 = look at this now, 2 = check it is what you meant, 3 = fine
 -- Nothing in the "fix" column is run for you. Read it first.
 
-with
+with recursive
 roles(role) as (
   values ('anon'), ('authenticated'), ('service_role')
 ),
 
--- Who gets new tables in public automatically (default privileges set by postgres).
+-- Who gets new tables and new id counters (sequences) in public automatically
+-- (default privileges set by postgres). Supabase's change removes both.
 defaults as (
   select r.role,
          exists (
@@ -28,7 +29,16 @@ defaults as (
              and d.defaclobjtype = 'r'
              and a.grantee = r.role::regrole
              and a.privilege_type = 'SELECT'
-         ) as gets_new_tables
+         ) as gets_new_tables,
+         exists (
+           select 1
+           from pg_default_acl d, aclexplode(d.defaclacl) a
+           where d.defaclrole = 'postgres'::regrole
+             and d.defaclnamespace = 'public'::regnamespace
+             and d.defaclobjtype = 'S'
+             and a.grantee = r.role::regrole
+             and a.privilege_type = 'USAGE'
+         ) as gets_new_sequences
   from roles r
 ),
 
@@ -42,7 +52,10 @@ tables as (
          -- any-column: a grant on single columns still reaches the Data API
          (has_any_column_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE') or has_table_privilege('anon', c.oid, 'DELETE')) as anon_any,
          (has_any_column_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE') or has_table_privilege('authenticated', c.oid, 'DELETE')) as auth_any,
-         has_any_column_privilege('service_role', c.oid, 'SELECT') as server_reads
+         has_any_column_privilege('service_role', c.oid, 'SELECT') as server_reads,
+         -- a view runs as its owner unless made with security_invoker (Postgres 15+)
+         (c.relkind = 'v' and exists (select 1 from unnest(c.reloptions) o
+                                      where o ~* '^security_invoker=(on|true|t|yes|y|1)$')) as invoker
   from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
   where n.nspname = 'public'
@@ -52,7 +65,64 @@ tables as (
 
 -- Postgres 17 added a MAINTAIN right next to TRUNCATE, REFERENCES and TRIGGER.
 pg as (
-  select current_setting('server_version_num')::int >= 170000 as has_maintain
+  select current_setting('server_version_num')::int >= 170000 as has_maintain,
+         current_setting('server_version_num')::int >= 150000 as has_invoker
+),
+
+-- Walk from each view down to the tables it reads, through views under it.
+-- skipping = a view on the way down runs as its owner, so row level security
+-- on the tables below it does not apply to the caller.
+view_walk(view_oid, rel_oid, skipping) as (
+  select t.oid, t.oid, not t.invoker
+  from tables t
+  where t.relkind in ('v', 'm')
+  union
+  select w.view_oid,
+         d.refobjid,
+         w.skipping or (c.relkind in ('v', 'm')
+                        and not (c.relkind = 'v' and exists (select 1 from unnest(c.reloptions) o
+                                                             where o ~* '^security_invoker=(on|true|t|yes|y|1)$')))
+  from view_walk w
+  join pg_rewrite r on r.ev_class = w.rel_oid
+  join pg_depend d on d.objid = r.oid
+                  and d.classid = 'pg_rewrite'::regclass
+                  and d.refclassid = 'pg_class'::regclass
+                  and d.refobjid <> w.rel_oid
+  join pg_class c on c.oid = d.refobjid
+),
+
+-- For each view: the tables with row level security that it reads around.
+view_rls as (
+  select w.view_oid,
+         string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by c.relname) as tables
+  from view_walk w
+  join pg_class c on c.oid = w.rel_oid
+  join pg_namespace n on n.oid = c.relnamespace
+  where w.skipping
+    and c.relkind in ('r', 'p')
+    and c.relrowsecurity
+  group by w.view_oid
+),
+
+-- Views that run as the caller, reachable by a browser role that lacks rights
+-- on something the view reads directly. Reads through the view fail for that role.
+view_needs as (
+  select t.name as view_name,
+         r.role,
+         string_agg(distinct format('%I.%I', n.nspname, c.relname), ', ') as tables
+  from tables t
+  join roles r on r.role in ('anon', 'authenticated')
+             and ((r.role = 'anon' and t.anon_any) or (r.role = 'authenticated' and t.auth_any))
+  join pg_rewrite rw on rw.ev_class = t.oid
+  join pg_depend d on d.objid = rw.oid
+                  and d.classid = 'pg_rewrite'::regclass
+                  and d.refclassid = 'pg_class'::regclass
+                  and d.refobjid <> t.oid
+  join pg_class c on c.oid = d.refobjid and c.relkind in ('r', 'p', 'v', 'm')
+  join pg_namespace n on n.oid = c.relnamespace
+  where t.invoker
+    and not has_any_column_privilege(r.role, c.oid, 'SELECT')
+  group by t.name, r.role
 ),
 
 -- Rights beyond read and write that new tables still give the browser roles.
@@ -148,29 +218,65 @@ findings(level, area, object, finding, fix) as (
 
   union all
 
+  -- New tables yes, their id counters no. A serial column has its own sequence,
+  -- and the table default does not cover it.
+  select 1,
+         'new tables',
+         d.role,
+         d.role || ' gets every new table automatically, but not its id counters. The first insert into a new table with a serial column fails with permission denied for sequence. Identity columns are not affected.',
+         'alter default privileges for role postgres in schema public grant usage, select on sequences to ' || d.role || ';'
+  from defaults d
+  where d.gets_new_tables and not d.gets_new_sequences
+
+  union all
+
   -- Tables and views.
   select case when not t.rls and t.relkind in ('r', 'p') and (t.anon_any or t.auth_any) then 1
+              when t.relkind in ('v', 'm') and (t.anon_any or t.auth_any) and v.tables is not null then 1
               when not t.server_reads then 2
               when t.rls and t.policies = 0 and (t.anon_any or t.auth_any) then 2
-              when t.relkind in ('v', 'm') and (t.anon_any or t.auth_any) then 2
+              when t.relkind in ('v', 'm') and (t.anon_any or t.auth_any) and not t.invoker then 2
               else 3 end,
          case when t.relkind in ('v', 'm') then 'view' else 'table' end,
          t.name,
          case when not t.rls and t.relkind in ('r', 'p') and (t.anon_any or t.auth_any)
               then 'Reachable through the API by ' || concat_ws(' and ', case when t.anon_any then 'signed-out visitors' end, case when t.auth_any then 'signed-in users' end) || ', with row level security OFF. Anyone with your public key can read or change every row they have rights to.'
+              when t.relkind = 'm' and (t.anon_any or t.auth_any) and v.tables is not null
+              then 'Reachable through the API by ' || concat_ws(' and ', case when t.anon_any then 'signed-out visitors' end, case when t.auth_any then 'signed-in users' end) || '. A materialized view holds a copy of the rows, taken with its owner''s rights, so row level security on ' || v.tables || ' does not apply. Every row shows.'
+              when t.relkind = 'v' and (t.anon_any or t.auth_any) and v.tables is not null
+              then 'Reachable through the API by ' || concat_ws(' and ', case when t.anon_any then 'signed-out visitors' end, case when t.auth_any then 'signed-in users' end) || '. It runs as its owner, not as the caller, so it skips row level security on ' || v.tables || '. Every row of those tables shows.'
               when not t.server_reads
               then 'Your server key cannot read it. Fine if nothing on the server uses it.'
               when t.rls and t.policies = 0 and (t.anon_any or t.auth_any)
               then 'Row level security is on with no policies, so API users see nothing. Fine if only the server uses it.'
-              when t.relkind in ('v', 'm') and (t.anon_any or t.auth_any)
-              then 'View reachable through the API. Views do not apply row level security unless made with security_invoker. Check it shows only what it should.'
+              when t.relkind in ('v', 'm') and (t.anon_any or t.auth_any) and not t.invoker
+              then 'Reachable through the API, running as its owner. The tables it reads have row level security off, so it shows every row of them. Fine if that is meant to be public.'
               else 'OK' end,
          case when not t.rls and t.relkind in ('r', 'p') and (t.anon_any or t.auth_any)
               then 'alter table ' || t.name || ' enable row level security;  -- then add policies for what the app needs, or: revoke all on table ' || t.name || ' from anon, authenticated;'
+              when t.relkind = 'm' and (t.anon_any or t.auth_any) and v.tables is not null
+              then 'revoke all on table ' || t.name || ' from anon, authenticated;  -- a materialized view cannot follow row level security'
+              when t.relkind = 'v' and (t.anon_any or t.auth_any) and v.tables is not null and (select has_invoker from pg)
+              then 'alter view ' || t.name || ' set (security_invoker = true);  -- then the caller needs rights on the tables it reads; views under it need the same'
+              when t.relkind = 'v' and (t.anon_any or t.auth_any) and v.tables is not null
+              then 'revoke all on table ' || t.name || ' from anon, authenticated;  -- security_invoker needs Postgres 15 or newer'
               when not t.server_reads
               then 'grant select, insert, update, delete on table ' || t.name || ' to service_role;'
+              when t.relkind = 'v' and (t.anon_any or t.auth_any) and not t.invoker and (select has_invoker from pg)
+              then 'alter view ' || t.name || ' set (security_invoker = true);  -- so it follows row level security once that is on'
               else '' end
   from tables t
+  left join view_rls v on v.view_oid = t.oid
+
+  union all
+
+  -- Views that run as the caller, where the caller lacks rights on what the view reads.
+  select 2,
+         'view',
+         n.view_name,
+         'Reads through this view as ' || n.role || ' will fail (permission denied): it runs as the caller, and ' || n.role || ' has no rights on ' || n.tables || '.',
+         'grant select on table ' || n.tables || ' to ' || n.role || ';  -- with row level security on, the policies decide the rows'
+  from view_needs n
 
   union all
 
