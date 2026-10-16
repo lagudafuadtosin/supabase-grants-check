@@ -53,3 +53,6 @@ grant usage on schema api to anon, authenticated, service_role;
 create table api.open_api_notes (id serial primary key, body text);           -- row security off, open: level 1 (api)
 grant select on api.open_api_notes to anon;
 create table api.private_api (id serial primary key);                          -- nobody but the owner: fine
+grant select on api.open_api_notes to authenticated;
+revoke usage on schema api from authenticated;                                  -- grants but no way in: level 1 (api)
+revoke usage on schema api from service_role;                                  -- no grants and no way in: level 2 (api)

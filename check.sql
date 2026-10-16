@@ -15,11 +15,15 @@
 -- It reads the public schema. If you added schemas to the Data API's exposed
 -- list (Project Settings > Data API), add them here, the same way:
 --   values ('public'), ('api')
+-- Supabase keeps that list outside the database, so it cannot be read from SQL.
+-- A schema in the list that does not exist is skipped.
 -- Rows for a schema other than public say which one in the object column.
 
 with recursive
 schemas(nsp) as (
-  values ('public')
+  select v.nsp
+  from (values ('public')) v(nsp)
+  where exists (select 1 from pg_namespace n where n.nspname = v.nsp)
 ),
 roles(role) as (
   values ('anon'), ('authenticated'), ('service_role')
@@ -48,7 +52,26 @@ defaults as (
              and d.defaclobjtype = 'S'
              and a.grantee = r.role::regrole
              and a.privilege_type = 'USAGE'
-         ) as gets_new_sequences
+         ) as gets_new_sequences,
+         exists (
+           select 1
+           from pg_default_acl d, aclexplode(d.defaclacl) a
+           where d.defaclrole = 'postgres'::regrole
+             and d.defaclnamespace = sc.nsp::regnamespace
+             and d.defaclobjtype = 'f'
+             and a.grantee = r.role::regrole
+             and a.privilege_type = 'EXECUTE'
+         ) as gets_new_functions,
+         -- Postgres gives new functions to PUBLIC, which every role is in, unless a
+         -- database-wide default for postgres takes it away. A per-schema one cannot.
+         not exists (
+           select 1
+           from pg_default_acl d
+           where d.defaclrole = 'postgres'::regrole
+             and d.defaclnamespace = 0
+             and d.defaclobjtype = 'f'
+             and not exists (select 1 from aclexplode(d.defaclacl) a where a.grantee = 0 and a.privilege_type = 'EXECUTE')
+         ) as public_gets_new_functions
   from schemas sc
   cross join roles r
 ),
@@ -78,6 +101,25 @@ tables as (
 pg as (
   select current_setting('server_version_num')::int >= 170000 as has_maintain,
          current_setting('server_version_num')::int >= 150000 as has_invoker
+),
+
+-- A role needs USAGE on a schema before any table grant in it works.
+schema_usage as (
+  select sc.nsp,
+         r.role,
+         case when sc.nsp = 'public' then r.role else sc.nsp || ': ' || r.role end as label,
+         has_schema_privilege(r.role, sc.nsp, 'USAGE') as usage,
+         exists (
+           select 1
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace
+           where n.nspname = sc.nsp
+             and c.relkind in ('r', 'p', 'v', 'm')
+             and (has_any_column_privilege(r.role, c.oid, 'SELECT,INSERT,UPDATE')
+                  or has_table_privilege(r.role, c.oid, 'DELETE'))
+         ) as has_grants
+  from schemas sc
+  cross join roles r
 ),
 
 -- Walk from each view down to the tables it reads, through views under it.
@@ -246,6 +288,34 @@ findings(level, area, object, finding, fix) as (
 
   union all
 
+  -- New functions. Supabase's change leaves this default alone, so every new
+  -- function is callable through the API by these roles the moment it exists.
+  select 2,
+         'new functions',
+         d.label,
+         d.role || ' gets every new function automatically' || case when d.gets_new_functions then '' else ', through PUBLIC, which every role is in' end || ', and the 30 Oct 2026 change does not stop this. Every function you add is callable through the API by ' || d.role || ' until you revoke it.',
+         concat_ws(' ',
+           case when d.gets_new_functions then 'alter default privileges for role postgres in schema ' || d.nsp || ' revoke execute on functions from ' || d.role || ';' end,
+           case when d.public_gets_new_functions then 'alter default privileges for role postgres revoke execute on functions from public;' end)
+         || '  -- then grant execute in each function''s migration'
+  from defaults d
+  where d.role in ('anon', 'authenticated') and (d.gets_new_functions or d.public_gets_new_functions)
+
+  union all
+
+  -- A listed schema the role cannot enter. Its table grants do nothing until then.
+  select case when u.has_grants then 1 else 2 end,
+         'schema',
+         u.label,
+         case when u.has_grants
+              then u.role || ' has grants on tables in ' || u.nsp || ' but no USAGE on the schema, so every request from it fails with permission denied for schema ' || u.nsp || '.'
+              else u.role || ' has no USAGE on schema ' || u.nsp || ', so nothing in it is reachable by that role. Fine if that is what you meant.' end,
+         'grant usage on schema ' || u.nsp || ' to ' || u.role || ';'
+  from schema_usage u
+  where not u.usage
+
+  union all
+
   -- Tables and views.
   select case when not t.rls and t.relkind in ('r', 'p') and (t.anon_any or t.auth_any) then 1
               when t.relkind in ('v', 'm') and (t.anon_any or t.auth_any) and v.tables is not null then 1
@@ -351,6 +421,7 @@ findings(level, area, object, finding, fix) as (
   from sequences s
 )
 
-select level, area, object, finding, fix
-from findings
-order by level, area, object;
+-- Aliased on purpose: the Supabase SQL editor's row limit rewrite breaks the plain form.
+select f.level, f.area, f.object, f.finding, f.fix
+from findings f
+order by f.level, f.area, f.object;

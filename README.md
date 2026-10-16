@@ -33,7 +33,9 @@ The `fix` column holds the exact line to paste **if** you decide to change somet
 ## What it checks
 
 - **New tables.** Which of the three roles gets every new table automatically, today and after 30 Oct.
+- **New functions.** The change leaves function defaults alone, so every new function is callable through the API by `anon` and `authenticated` the moment it exists, either by name or through `PUBLIC`, which every role is in. Taking the per-schema line away is not enough while `PUBLIC` keeps it. The check says which, with the revoke lines if you would rather grant each one yourself.
 - **New id counters.** Supabase's change also stops handing new sequences to the three roles. A role that gets new tables but not new sequences fails on the first insert into a new table with a `serial` column. Flagged as level 1 with the one default-privileges line that fixes it.
+- **A listed schema a role cannot enter.** A table grant does nothing until the role has USAGE on the schema. A role with table grants there and no USAGE is flagged, with the grant line.
 - **Tables reachable with row level security off.** Anyone with your public key can read or change them.
 - **Tables your server key cannot read.**
 - **Tables with row level security on and no policies.** API users see nothing. Fine if only your server uses them.
@@ -71,7 +73,7 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Limits
 
-- It reads the `public` schema, the one the Data API exposes by default. If you added schemas to the exposed list (Project Settings > Data API), add them to the `schemas` list at the top of `check.sql`. The exposed list itself cannot be read from SQL, so it is typed by hand. Rows for another schema name it in the `object` column, and every fix line names its schema.
+- It reads the `public` schema, the one the Data API exposes by default. If you added schemas to the exposed list (Project Settings > Data API), add them to the `schemas` list at the top of `check.sql`. Supabase keeps that list outside the database, so it cannot be read from SQL. A schema in the list that does not exist is skipped. A role that has table grants in a listed schema but no USAGE on the schema is flagged, because those grants do nothing until then. Rows for another schema name it in the `object` column, and every fix line names its schema.
 - It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use, and only reports the `supabase_admin` defaults, because they cannot be changed from the SQL editor.
 - It is a guide, not an audit. It cannot know what your app is meant to allow.
 

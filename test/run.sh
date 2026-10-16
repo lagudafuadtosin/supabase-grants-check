@@ -33,6 +33,13 @@ psql -q -U postgres -d $db -c "revoke truncate, references, trigger, maintain on
 echo "== after the truncate, id counter, view and sequence default fixes =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
 # With a second schema in the list: its open table must appear, named with the schema.
-sed "s/values ('public')/values ('public'), ('api')/" "$here/../check.sql" > /tmp/check-api.sql
+sed "s/values ('public')/values ('public'), ('api'), ('gone')/" "$here/../check.sql" > /tmp/check-api.sql
 echo "== with the api schema in the list =="
 psql -U postgres -d $db -P pager=off -f /tmp/check-api.sql
+# New functions: the anon line taken away is not enough while PUBLIC keeps them.
+psql -q -U postgres -d $db -c "alter default privileges for role postgres in schema public revoke execute on functions from anon, authenticated"
+echo "== function default revoked for anon and authenticated, PUBLIC still has it =="
+psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
+psql -q -U postgres -d $db -c "alter default privileges for role postgres revoke execute on functions from public"
+echo "== PUBLIC function default revoked too: no new functions rows =="
+psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
