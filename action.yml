@@ -1,0 +1,26 @@
+name: supabase-grants-check
+description: See who can reach your Supabase tables and functions through the Data API, and fail on level 1 findings.
+branding:
+  icon: shield
+  color: green
+inputs:
+  db-url:
+    description: Postgres connection string. For a local Supabase started in the job, postgres://postgres:postgres@127.0.0.1:54322/postgres
+    required: true
+  schemas:
+    description: Exposed schemas, comma separated.
+    required: false
+    default: public
+  fail-on:
+    description: Fail when anything is at this level or below. 1, 2, 3 or none.
+    required: false
+    default: '1'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SGC_DB_URL: ${{ inputs.db-url }}
+        SGC_SCHEMAS: ${{ inputs.schemas }}
+        SGC_FAIL_ON: ${{ inputs.fail-on }}
+      run: npx --yes supabase-grants-check@1 --db-url "$SGC_DB_URL" --schemas "$SGC_SCHEMAS" --fail-on "$SGC_FAIL_ON"

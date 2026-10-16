@@ -1,0 +1,40 @@
+{
+  "name": "supabase-grants-check",
+  "version": "1.0.0",
+  "description": "See who can reach your Supabase tables and functions through the Data API, and fail CI when a table is open with row level security off or your server key loses new tables after 30 Oct 2026.",
+  "type": "module",
+  "bin": {
+    "supabase-grants-check": "bin/supabase-grants-check.js"
+  },
+  "files": [
+    "bin",
+    "check.sql",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/cli.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "supabase",
+    "postgres",
+    "postgrest",
+    "rls",
+    "row-level-security",
+    "grants",
+    "security",
+    "ci"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lagudafuadtosin/supabase-grants-check.git"
+  },
+  "homepage": "https://github.com/lagudafuadtosin/supabase-grants-check#readme",
+  "license": "MIT"
+}

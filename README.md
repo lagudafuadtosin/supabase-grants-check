@@ -30,6 +30,39 @@ The one most people will miss: **your server key**. If your backend, Edge Functi
 
 The `fix` column holds the exact line to paste **if** you decide to change something. Nothing is run for you. Some fixes close things your app may rely on, so read each one first.
 
+The Supabase SQL editor may say the query creates tables without row level security. It does not, it only reads. Press **Run without RLS**, which runs it exactly as written.
+
+## In CI, on every migration
+
+The same check as a command. It fails when anything is at level 1, so a table left open, or a server key that stops getting new tables, is caught in the pull request instead of in production.
+
+```sh
+npx supabase-grants-check --db-url postgres://postgres:postgres@127.0.0.1:54322/postgres
+```
+
+That address is the local database from `supabase start`, which is what CI usually runs against. A real project works too: use its connection string from **Project Settings > Database**. It only reads.
+
+| option | |
+|---|---|
+| `--db-url <url>` | the database. Defaults to `DATABASE_URL`, then `SUPABASE_DB_URL` |
+| `--schemas public,api` | the schemas your Data API exposes. Default `public` |
+| `--fail-on 1` | fail when anything is at this level or below: `1`, `2`, `3` or `none` |
+| `--json` | print the rows as JSON |
+
+Exit code 0 is a pass, 1 means findings, 2 means it could not run, so a broken connection never passes quietly.
+
+In GitHub Actions, after your migrations are applied to the local database:
+
+```yaml
+- uses: supabase/setup-cli@v1
+- run: supabase start
+- uses: lagudafuadtosin/supabase-grants-check@v1
+  with:
+    db-url: postgres://postgres:postgres@127.0.0.1:54322/postgres
+```
+
+Each failing row also shows as an error on the run.
+
 ## What it checks
 
 - **New tables.** Which of the three roles gets every new table automatically, today and after 30 Oct.
@@ -69,7 +102,7 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Tested
 
-`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check six ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away, and once with a second schema in the list, whose open table must then appear. Tested on PostgreSQL 18, and run read-only on a live Supabase project.
+`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check six ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away, and once with a second schema in the list, whose open table must then appear. `test/cli.sh` builds the same database and runs the command against it: the exit codes, `--json`, `--schemas`, `--fail-on`, a database it cannot reach, and the GitHub error lines. Tested on PostgreSQL 18, and run read-only on a live Supabase project (PostgreSQL 17).
 
 ## Limits
 
