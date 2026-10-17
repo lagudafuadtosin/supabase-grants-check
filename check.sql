@@ -16,14 +16,18 @@
 -- list (Project Settings > Data API), add them here, the same way:
 --   values ('public'), ('api')
 -- Supabase keeps that list outside the database, so it cannot be read from SQL.
--- A schema in the list that does not exist is skipped.
+-- A schema in the list that does not exist is flagged, in case the name is mistyped.
 -- Rows for a schema other than public say which one in the object column.
 
 with recursive
-schemas(nsp) as (
+listed(nsp) as (
   select v.nsp
   from (values ('public')) v(nsp)
-  where exists (select 1 from pg_namespace n where n.nspname = v.nsp)
+),
+schemas(nsp) as (
+  select l.nsp
+  from listed l
+  where exists (select 1 from pg_namespace n where n.nspname = l.nsp)
 ),
 roles(role) as (
   values ('anon'), ('authenticated'), ('service_role')
@@ -313,6 +317,17 @@ findings(level, area, object, finding, fix) as (
          'grant usage on schema ' || u.nsp || ' to ' || u.role || ';'
   from schema_usage u
   where not u.usage
+
+  union all
+
+  -- A listed schema that does not exist. Nothing in it was checked, so a typo would pass quietly.
+  select 1,
+         'schema',
+         l.nsp,
+         'Schema ' || l.nsp || ' is in the list but does not exist, so nothing in it was checked. Compare the name with Project Settings > Data API.',
+         '-- correct the name in the schemas list at the top (or in --schemas)'
+  from listed l
+  where not exists (select 1 from pg_namespace n where n.nspname = l.nsp)
 
   union all
 

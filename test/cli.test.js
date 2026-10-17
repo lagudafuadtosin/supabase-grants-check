@@ -57,6 +57,9 @@ test('--schemas reads another exposed schema', { skip }, () => {
   const both = JSON.parse(run(['--db-url', url, '--json', '--fail-on', 'none', '--schemas', 'public,api']).out)
   assert.ok(both.some((r) => r.object === 'api.open_api_notes' && Number(r.level) === 1))
   assert.ok(both.some((r) => r.area === 'schema' && r.object === 'api: authenticated'))
+  const typo = run(['--db-url', url, '--json', '--schemas', 'public,apl'])
+  assert.equal(typo.code, 1)
+  assert.ok(JSON.parse(typo.out).some((r) => r.area === 'schema' && r.object === 'apl' && Number(r.level) === 1))
 })
 
 test('in GitHub Actions each failing row is an error line', { skip }, () => {

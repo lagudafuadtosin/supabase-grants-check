@@ -1,6 +1,6 @@
 {
   "name": "supabase-grants-check",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "See who can reach your Supabase tables and functions through the Data API, and fail CI when a table is open with row level security off or your server key loses new tables after 30 Oct 2026.",
   "type": "module",
   "bin": {

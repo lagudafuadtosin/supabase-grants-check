@@ -106,7 +106,7 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Limits
 
-- It reads the `public` schema, the one the Data API exposes by default. If you added schemas to the exposed list (Project Settings > Data API), add them to the `schemas` list at the top of `check.sql`. Supabase keeps that list outside the database, so it cannot be read from SQL. A schema in the list that does not exist is skipped. A role that has table grants in a listed schema but no USAGE on the schema is flagged, because those grants do nothing until then. Rows for another schema name it in the `object` column, and every fix line names its schema.
+- It reads the `public` schema, the one the Data API exposes by default. If you added schemas to the exposed list (Project Settings > Data API), add them to the `schemas` list at the top of `check.sql`. Supabase keeps that list outside the database, so it cannot be read from SQL. A schema in the list that does not exist is flagged at level 1, so a mistyped name cannot pass quietly. A role that has table grants in a listed schema but no USAGE on the schema is flagged, because those grants do nothing until then. Rows for another schema name it in the `object` column, and every fix line names its schema.
 - It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use, and only reports the `supabase_admin` defaults, because they cannot be changed from the SQL editor.
 - It is a guide, not an audit. It cannot know what your app is meant to allow.
 
