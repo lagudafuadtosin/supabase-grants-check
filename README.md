@@ -76,6 +76,7 @@ Each failing row also shows as an error on the run.
 - **Functions a signed-out visitor can call**, flagged hardest when they are `SECURITY DEFINER`, because those run with their owner's rights. Trigger functions are left out, because the API cannot call them.
 - **Id counters that will refuse inserts.** A `serial` column has its own sequence, and a table grant does not cover it. If a role can insert into the table but cannot use the sequence, inserts through the API fail with `permission denied for sequence`. Identity columns need no grant and are left out.
 - **Rights the Data API never uses.** Supabase's old defaults give `anon` and `authenticated` TRUNCATE, REFERENCES and TRIGGER (and MAINTAIN on Postgres 17) on every table. The API never uses them, but TRUNCATE skips row level security if anything runs SQL as those roles. Shown as one row with one safe revoke.
+- **Another role that creates tables.** Default privileges belong to the role that set them, so the `postgres` defaults do not cover a table made by another role, for example a tool or teammate that connects with its own login. Each such role that owns tables in a listed schema, without its own default for your server key, is shown at level 2 with the lines to set it.
 - **Supabase's own admin role.** Objects that `supabase_admin` creates in `public` arrive open to `anon` and `authenticated`, and a project owner cannot change that default. The check tells you when that default exists.
 
 ## The fix most projects need
@@ -102,12 +103,12 @@ grant select, insert, update, delete on table public.notes to authenticated;
 
 ## Tested
 
-`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check six ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away, and once with a second schema in the list, whose open table must then appear. `test/cli.sh` builds the same database and runs the command against it: the exit codes, `--json`, `--schemas`, `--fail-on`, a database it cannot reach, and the GitHub error lines. Tested on PostgreSQL 18, and run read-only on a live Supabase project (PostgreSQL 17).
+`test/run.sh` builds a small stand-in for a Supabase project in a local Postgres (the three roles, Supabase's old defaults, and one table or function for each finding), then runs the check six ways: before 30 Oct, after the change (table and sequence defaults removed), after the table half of the suggested fix (the id counter row must appear), the same read as if today were after 30 Oct, and after running the other fix lines it prints, to prove their rows go away, once with a second schema in the list, whose open table must then appear, and with a table made by a second role, whose row must go away once its printed lines are run. `test/cli.sh` builds the same database and runs the command against it: the exit codes, `--json`, `--schemas`, `--fail-on`, a database it cannot reach, and the GitHub error lines. Tested on PostgreSQL 18, and run read-only on a live Supabase project (PostgreSQL 17).
 
 ## Limits
 
 - It reads the `public` schema, the one the Data API exposes by default. If you added schemas to the exposed list (Project Settings > Data API), add them to the `schemas` list at the top of `check.sql`. Supabase keeps that list outside the database, so it cannot be read from SQL. A schema in the list that does not exist is flagged at level 1, so a mistyped name cannot pass quietly. A role that has table grants in a listed schema but no USAGE on the schema is flagged, because those grants do nothing until then. Rows for another schema name it in the `object` column, and every fix line names its schema.
-- It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use, and only reports the `supabase_admin` defaults, because they cannot be changed from the SQL editor.
+- It reads defaults set by the `postgres` role, the role the SQL editor and most migrations use, and only reports the `supabase_admin` defaults, because they cannot be changed from the SQL editor. Another role is only found once it owns a table in a listed schema.
 - It is a guide, not an audit. It cannot know what your app is meant to allow.
 
 ## Licence

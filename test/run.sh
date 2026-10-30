@@ -5,7 +5,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 db=grants_check_test
 psql -q -U postgres -c "drop database if exists $db" -c "create database $db"
-psql -q -U postgres -c "drop role if exists anon" -c "drop role if exists authenticated" -c "drop role if exists service_role" -c "drop role if exists supabase_admin" 2>/dev/null || true
+psql -q -U postgres -c "drop role if exists anon" -c "drop role if exists authenticated" -c "drop role if exists service_role" -c "drop role if exists supabase_admin" -c "drop role if exists app_tool" 2>/dev/null || true
 psql -q -U postgres -d $db -f "$here/fixture.sql"
 echo "== before 30 Oct 2026 =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
@@ -42,4 +42,14 @@ echo "== function default revoked for anon and authenticated, PUBLIC still has i
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
 psql -q -U postgres -d $db -c "alter default privileges for role postgres revoke execute on functions from public"
 echo "== PUBLIC function default revoked too: no new functions rows =="
+psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
+# A second role that creates tables (a tool with its own login): postgres's defaults do not
+# cover its tables, so it must get its own row. Then its printed fix, and the row must be gone.
+psql -q -U postgres -d $db -c "create role app_tool nologin" -c "grant create, usage on schema public to app_tool" \
+  -c "set role app_tool" -c "create table public.tool_notes (id serial primary key)" -c "reset role"
+echo "== a table created by app_tool: its created by row =="
+psql -U postgres -d $db -P pager=off -f "$here/../check.sql"
+psql -q -U postgres -d $db -c "alter default privileges for role app_tool in schema public grant select, insert, update, delete on tables to service_role" \
+  -c "alter default privileges for role app_tool in schema public grant usage, select on sequences to service_role"
+echo "== app_tool defaults set as printed: no created by row =="
 psql -U postgres -d $db -P pager=off -f "$here/../check.sql"

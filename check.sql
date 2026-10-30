@@ -209,6 +209,30 @@ admin_defaults as (
   having count(*) > 0
 ),
 
+-- Roles other than postgres that own tables in a listed schema. The defaults above
+-- are postgres's, and they do not cover tables another role creates.
+creators as (
+  select n.nspname as nsp,
+         c.relowner::regrole::text as role,
+         count(*) as n
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname in (select nsp from schemas)
+    and c.relkind in ('r', 'p')
+    and c.relowner not in ('postgres'::regrole, coalesce(to_regrole('supabase_admin'), 0))
+    and not exists (select 1 from pg_depend dep where dep.objid = c.oid and dep.deptype = 'e')
+    and not exists (
+      select 1
+      from pg_default_acl d, aclexplode(d.defaclacl) a
+      where d.defaclrole = c.relowner
+        and d.defaclnamespace in (0, n.oid)
+        and d.defaclobjtype = 'r'
+        and a.grantee = 'service_role'::regrole
+        and a.privilege_type = 'SELECT'
+    )
+  group by n.nspname, c.relowner
+),
+
 -- Tables where the browser roles still hold TRUNCATE, REFERENCES or TRIGGER.
 extra_tables as (
   select split_part(t.name, '.', 1) as nsp,
@@ -412,6 +436,16 @@ findings(level, area, object, finding, fix) as (
          'Objects Supabase''s own admin role creates in ' || a.nsp || ' arrive open to ' || a.roles || '. A project owner cannot change that default (permission denied). If such an object shows up in the rows here, revoke on that object directly.',
          ''
   from admin_defaults a
+
+  union all
+
+  -- Another role that creates tables. Its new tables follow its own defaults, not postgres's.
+  select 2,
+         'new tables',
+         case when c.nsp = 'public' then 'created by ' || c.role else c.nsp || ': created by ' || c.role end,
+         c.role || ' owns ' || c.n || ' table' || case when c.n = 1 then '' else 's' end || ' in ' || c.nsp || '. Tables it creates do not follow the defaults set for postgres, so your server key, signed-in users and visitors get none of them. A new table made by ' || c.role || ' fails with 42501 until it is granted.',
+         'alter default privileges for role ' || c.role || ' in schema ' || c.nsp || ' grant select, insert, update, delete on tables to service_role; alter default privileges for role ' || c.role || ' in schema ' || c.nsp || ' grant usage, select on sequences to service_role;  -- run as ' || c.role || ' or a member of it, or grant each table in its migration'
+  from creators c
 
   union all
 
